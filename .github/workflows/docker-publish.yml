@@ -5,32 +5,44 @@ on:
     branches:
       - main
       - master
+      - dashboard-mode
     tags:
       - "v*"
   pull_request:
     branches:
       - main
       - master
+  workflow_dispatch:
 
 env:
-  DOCKER_IMAGE: turley/frame-tv-artwork-sync
+  # GitHub Container Registry needs no extra secrets: the built-in GITHUB_TOKEN
+  # can push, as long as the job has packages: write below.
+  DOCKER_IMAGE: ghcr.io/thomaswoerdeman/frame-tv-dashboard
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
@@ -42,6 +54,7 @@ jobs:
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
@@ -54,3 +67,15 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        # Renders one dashboard with no TV involved: catches a module that never
+        # made it into the image, or a missing font, before anyone pulls it.
+        run: |
+          docker buildx build --load -t smoke-test:local .
+          docker run --rm \
+            -e LOCATION_LATITUDE=52.3676 \
+            -e LOCATION_LONGITUDE=4.9041 \
+            -e LOCATION_TIMEZONE=Europe/Amsterdam \
+            -e TV_IPS=192.0.2.1 \
+            smoke-test:local python sync_artwork.py --test-dashboard /tmp/smoke.jpg

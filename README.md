@@ -2,10 +2,20 @@
 
 Automatically sync artwork from a local folder to Samsung Frame TVs using Docker.
 
-**Docker Hub:** [turley/frame-tv-artwork-sync](https://hub.docker.com/r/turley/frame-tv-artwork-sync)
+**Image:** `ghcr.io/thomaswoerdeman/frame-tv-dashboard:latest` (linux/amd64, linux/arm64)
+
+```bash
+docker pull ghcr.io/thomaswoerdeman/frame-tv-dashboard:latest
+```
+
+Forked from [turley/frame-tv-artwork-sync](https://github.com/turley/frame-tv-artwork-sync)
+([upstream image on Docker Hub](https://hub.docker.com/r/turley/frame-tv-artwork-sync)),
+with dashboard mode and a web UI added.
 
 ## Features
 
+- Dashboard mode: a small live weather card composited onto your own artwork
+- Web UI for previewing the dashboard, placing the card and managing templates
 - Sync artwork to one or multiple Frame TVs
 - Automatic periodic sync (configurable interval)
 - Auto-cleanup: removes images from TVs when deleted locally
@@ -25,7 +35,7 @@ Automatically sync artwork from a local folder to Samsung Frame TVs using Docker
 1. Download [docker-compose.yml](docker-compose.yml)
 2. Create folders:
    ```bash
-   mkdir -p artwork tokens
+   mkdir -p artwork tokens templates config
    ```
 3. Add your images to the artwork folder
 4. Edit `docker-compose.yml` with your TV IP addresses
@@ -40,7 +50,7 @@ On first run, approve the connection on each TV when prompted. Tokens are saved 
 
 ```bash
 # Create folders
-mkdir -p artwork tokens
+mkdir -p artwork tokens templates config
 
 # Run container
 docker run -d \
@@ -48,9 +58,12 @@ docker run -d \
   --restart unless-stopped \
   -e TV_IPS="192.168.1.100,192.168.1.101" \
   -e SYNC_INTERVAL_MINUTES="5" \
+  -p 8080:8080 \
   -v ./artwork:/artwork \
   -v ./tokens:/tokens \
-  turley/frame-tv-artwork-sync
+  -v ./templates:/templates \
+  -v ./config:/config \
+  ghcr.io/thomaswoerdeman/frame-tv-dashboard:latest
 ```
 
 ## Configuration
@@ -72,6 +85,27 @@ All settings are configured via environment variables:
 | `LOCATION_TIMEZONE`        | Timezone name (e.g., America/New_York)                                                    | `UTC`     |
 | `BRIGHTNESS_MIN`           | Minimum brightness when sun is below horizon                                              | `2`       |
 | `BRIGHTNESS_MAX`           | Maximum brightness if sun were at zenith (90°)                                            | `10`      |
+| `DASHBOARD_ENABLED`        | Show a live weather card on the TV (true/false)                                            | (unset)   |
+| `DASHBOARD_LOCATION_NAME`  | Name shown on the card                                                                    | timezone city |
+| `DASHBOARD_BACKGROUND`     | Template image, or a folder of images to rotate through                                   | `/templates` |
+| `DASHBOARD_CORNER`         | `top-left`, `top-right`, `bottom-left`, `bottom-right`                                     | `bottom-right` |
+| `DASHBOARD_CARD_SCALE`     | Card size multiplier (0.4–2.5)                                                            | `1.0`     |
+| `DASHBOARD_CARD_HOURS`     | Hours shown on the card (`0` to hide the strip)                                            | `4`       |
+| `DASHBOARD_IMAGE_FORMAT`   | `jpg` (small, quick uploads) or `png` (lossless, ~5x larger)                                | `jpg`     |
+| `DASHBOARD_JPEG_QUALITY`   | JPEG quality when the format is `jpg`                                                     | `92`      |
+| `DASHBOARD_UNITS`          | `metric` (°C, km/h) or `imperial` (°F, mph)                                                | `metric`  |
+| `DASHBOARD_TIME_FORMAT`    | `24h` or `12h`                                                                            | `24h`     |
+| `DASHBOARD_WIDTH`          | Render width in pixels — match your TV panel                                              | `3840`    |
+| `DASHBOARD_HEIGHT`         | Render height in pixels                                                                   | `2160`    |
+| `DASHBOARD_FORECAST_HOURS` | Hours of forecast data to fetch                                                           | `12`      |
+| `DASHBOARD_FORECAST_DAYS`  | Days of forecast data to fetch                                                            | `5`       |
+| `WEATHER_TIMEOUT`          | Seconds to wait for the weather API                                                       | `15`      |
+| `WEATHER_ICON_DIR`         | Folder holding the weather icon PNGs                                                      | `assets/weather-icons` |
+| `CONFIG_DIR`               | Where the web UI stores settings                                                          | `/config` |
+| `WEB_UI_ENABLED`           | Serve the web UI (true/false)                                                             | `true`    |
+| `WEB_UI_HOST`              | Interface the web UI binds to                                                             | `0.0.0.0` |
+| `WEB_UI_PORT`              | Web UI port                                                                               | `8080`    |
+| `WEB_UI_MAX_UPLOAD_MB`     | Largest template image that can be uploaded                                               | `40`      |
 | `REMOVE_UNKNOWN_IMAGES`    | Remove images from TV that aren't in the artwork folder (true/false)                      | `false`   |
 | `AUTO_OFF_TIME`            | Time to turn off TVs in art mode (24-hour format, e.g., `22:00`)                          | (unset)   |
 | `AUTO_OFF_GRACE_HOURS`     | Hours after `AUTO_OFF_TIME` to keep trying to turn off TVs                                | `2`       |
@@ -144,6 +178,102 @@ python sync_artwork.py --test-solar
 ```
 
 This displays hourly brightness levels for key solar positions (March Equinox, June Solstice, December Solstice), helping you verify your settings before deploying.
+
+### Dashboard Mode
+
+Dashboard mode draws a small weather card into one corner of a template image —
+your own artwork stays the picture, the data sits quietly on top — and refreshes
+it on every sync cycle. The card shows current temperature and conditions,
+today's high and low, and the next few hours with rain chance.
+
+Weather data comes from [Open-Meteo](https://open-meteo.com): no API key, no
+account, no signup. The icons are [Meteocons](https://github.com/basmilius/meteocons)
+by Bas Milius (MIT), vendored under `assets/weather-icons` and chosen per WMO
+weather code with separate day and night artwork. Set your coordinates, point it at a template folder, and
+turn it on:
+
+```yaml
+environment:
+  TV_IPS: "192.168.1.100"
+  SYNC_INTERVAL_MINUTES: "5"
+  DASHBOARD_ENABLED: "true"
+  DASHBOARD_LOCATION_NAME: "Amsterdam"
+  DASHBOARD_BACKGROUND: "/templates"
+  LOCATION_LATITUDE: "52.3676"
+  LOCATION_LONGITUDE: "4.9041"
+  LOCATION_TIMEZONE: "Europe/Amsterdam"
+volumes:
+  - ./templates:/templates
+  - ./config:/config
+```
+
+`DASHBOARD_BACKGROUND` takes a single image or a folder. A folder rotates: each
+refresh moves to the next image, so the artwork changes through the day while
+the card stays put. With no template at all the card renders on a plain dark
+background.
+
+Each refresh writes `dashboard-<timestamp>.jpg` into the artwork folder, uploads
+it, puts it on screen, and only then deletes the previous render from both the
+folder and the TV. The name has to change every cycle: the TV's art API has no
+"replace this image" call and the sync logic keys off filenames, so a fixed name
+would upload once and never update again.
+
+The order is deliberate — upload, select, *then* delete:
+
+- Deleting first would leave the TV with nothing selected for a moment, and it
+  falls back to its own default art.
+- If the upload fails (a busy or briefly unreachable TV), the previous render is
+  kept and displayed rather than deleted, so the frame always has something to
+  show. The next cycle retries.
+- Any `dashboard-*` image on the TV that isn't the current render is removed,
+  even if a stale copy is still sitting in the artwork folder, so renders can't
+  pile up on the TV.
+
+One case this can't cover: if the TV's mapping file in `TOKEN_DIR` is lost, past
+renders become unrecognised "unknown" images that only
+`REMOVE_UNKNOWN_IMAGES=true` will clear. Keep the tokens volume persistent.
+
+**Preview the card without a TV:**
+
+```bash
+docker compose run --rm frame-tv-sync python sync_artwork.py --test-dashboard /artwork/preview.png
+```
+
+Notes:
+
+- Leave the slideshow off (`SLIDESHOW_ENABLED` unset or `false`). A slideshow
+  rotates the TV away from the dashboard between refreshes.
+- Static artwork in the same folder still syncs normally, but the dashboard is
+  always the image selected for display.
+- If the weather API is unreachable, the previous render stays on the wall and
+  the next cycle tries again — no error card, no blank frame.
+- Sync intervals below 5 minutes gain little: Open-Meteo updates roughly every
+  15 minutes, and each refresh is a full-resolution upload to the TV.
+
+### Web UI
+
+Browse to `http://<docker-host>:8080` for a preview of the dashboard and the
+controls that shape it:
+
+- **Preview** — the card rendered on the next template in rotation. Click a
+  corner of the preview to move the card; drag the size slider to scale it.
+- **Location and display** — name, coordinates, timezone, units, clock format
+  and panel resolution.
+- **Template images** — upload, review and delete the images the card is drawn
+  on.
+- **Sync to TV now** — cuts the wait between sync cycles short instead of
+  waiting out the interval.
+- **Status** — configured TVs, sync interval, which render is live and how old
+  it is.
+
+Changes are saved to `CONFIG_DIR/dashboard.json` and take effect on the next
+refresh — no container restart. Environment variables remain the defaults;
+anything set here overrides them, and deleting the file reverts to the
+environment.
+
+The UI is **unauthenticated**, like the rest of this service: keep it on your
+LAN and don't port-forward it. Set `WEB_UI_ENABLED=false` to turn it off, or
+drop the `ports:` mapping to keep it inside the Docker network.
 
 ### Image Cleanup Control
 
@@ -314,6 +444,8 @@ If no images change during a sync cycle, slideshow settings are not modified.
 - Samsung Frame TV (2016+ models with Tizen OS)
 - Docker and Docker Compose (or Python 3.9+ for local testing)
 - Network access to TVs
+- Dashboard mode: outbound HTTPS to `api.open-meteo.com`
+- Web UI: a browser on the same network
 
 ## Troubleshooting
 
@@ -324,6 +456,13 @@ Set `LOG_LEVEL=DEBUG` in your environment to see detailed sync operations and TV
 ## Credits
 
 Built using [samsung-tv-ws-api](https://github.com/NickWaterton/samsung-tv-ws-api) by NickWaterton.
+
+Weather data from [Open-Meteo](https://open-meteo.com) (CC BY 4.0 attribution
+for the data, free for non-commercial use without an API key).
+
+Weather icons are [Meteocons](https://github.com/basmilius/meteocons) by Bas
+Milius, MIT licensed. The vendored subset and its licence are under
+[assets/weather-icons](assets/weather-icons).
 
 ## AI Disclosure
 

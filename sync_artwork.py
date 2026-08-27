@@ -106,6 +106,28 @@ LOCATION_TIMEZONE = os.getenv('LOCATION_TIMEZONE', 'UTC')
 BRIGHTNESS_MIN = int(os.getenv('BRIGHTNESS_MIN', '2'))
 BRIGHTNESS_MAX = int(os.getenv('BRIGHTNESS_MAX', '10'))
 
+# Optional dashboard mode: composite a small live info card (weather, ...) onto a
+# template image and show it on the TV. Settings live in dashboard_settings —
+# environment defaults, overridable at runtime from the web UI — and are re-read
+# every cycle so changes apply without a restart.
+import dashboard
+import dashboard_settings
+
+# Web UI for previewing the dashboard, editing its settings and managing
+# template images.
+WEB_UI_ENABLED = os.getenv('WEB_UI_ENABLED', 'true').lower() in ('true', '1', 'yes')
+WEB_UI_HOST = os.getenv('WEB_UI_HOST', '0.0.0.0')
+WEB_UI_PORT = int(os.getenv('WEB_UI_PORT', '8080'))
+
+# Filename of the dashboard render produced this cycle. Set by sync_all_tvs()
+# and read by TVArtworkSync.sync() so the dashboard is the image selected for
+# display, rather than whichever artwork happens to come first in the mapping.
+CURRENT_DASHBOARD_IMAGE: Optional[str] = None
+
+# Set by the web UI (from its own thread) to cut the wait short and sync now.
+WAKE_EVENT: Optional[asyncio.Event] = None
+EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
 # Optional cleanup setting
 REMOVE_UNKNOWN_IMAGES = os.getenv('REMOVE_UNKNOWN_IMAGES', '').lower() in ('true', '1', 'yes')
 
@@ -123,6 +145,18 @@ DRY_RUN = False
 if BRIGHTNESS_MIN >= BRIGHTNESS_MAX:
     logger.error(f"Invalid brightness range: BRIGHTNESS_MIN ({BRIGHTNESS_MIN}) must be less than BRIGHTNESS_MAX ({BRIGHTNESS_MAX}).")
     sys.exit(1)
+
+# Check the dashboard configuration we start with. These are warnings, not
+# fatal: the web UI can supply what's missing while the service is running.
+_dashboard_startup = dashboard_settings.get()
+if _dashboard_startup['enabled']:
+    if _dashboard_startup['latitude'] is None or _dashboard_startup['longitude'] is None:
+        logger.warning("Dashboard is enabled but has no coordinates yet. Set LOCATION_LATITUDE "
+                       "and LOCATION_LONGITUDE, or enter a location in the web UI.")
+    if SLIDESHOW_OVERRIDE and SLIDESHOW_ENABLED:
+        logger.warning("SLIDESHOW_ENABLED is set together with dashboard mode: the TV will "
+                       "rotate away from the dashboard between refreshes. Leave the slideshow "
+                       "off to keep the dashboard on screen.")
 
 # Supported image formats
 SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png'}
@@ -904,6 +938,18 @@ class TVArtworkSync:
             to_upload = local_images - tv_images
             to_delete = tv_images - local_images
 
+            # Dashboard mode: exactly one render should exist on the TV. Anything
+            # else named dashboard-* is a previous cycle's image and goes, even
+            # if a stale copy is still sitting in the artwork folder (a prune
+            # that failed on a read-only mount, say). By the same token, don't
+            # bother uploading a stale render we're about to delete.
+            if CURRENT_DASHBOARD_IMAGE:
+                superseded = {name for name in (tv_images | local_images)
+                              if dashboard.is_dashboard_image(name)
+                              and name != CURRENT_DASHBOARD_IMAGE}
+                to_upload -= superseded
+                to_delete |= (superseded & tv_images)
+
             # Handle unknown images based on configuration
             if unknown_images:
                 if REMOVE_UNKNOWN_IMAGES:
@@ -943,11 +989,42 @@ class TVArtworkSync:
                 logger.info(f"Using manual brightness override: {BRIGHTNESS}")
 
             # Upload new images
+            uploaded = set()
             for filename in to_upload:
                 file_path = Path(ARTWORK_DIR) / filename
-                await self.upload_image(file_path)
+                if await self.upload_image(file_path):
+                    uploaded.add(filename)
                 # Small delay between uploads to avoid overwhelming the TV
                 await asyncio.sleep(UPLOAD_DELAY)
+
+            # Dashboard mode: show the new render *before* the old one is
+            # deleted. Deleting first leaves the TV with nothing selected for a
+            # moment and it drops back to its own art. And if this cycle's
+            # upload failed, keep the previous render on the TV rather than
+            # deleting the only image the frame has to show.
+            dashboard_selected = False
+            if CURRENT_DASHBOARD_IMAGE and not DRY_RUN:
+                content_id = self.file_mapping.get(CURRENT_DASHBOARD_IMAGE)
+                is_on_tv = content_id is not None and (
+                    CURRENT_DASHBOARD_IMAGE in uploaded or CURRENT_DASHBOARD_IMAGE in tv_images
+                )
+                if is_on_tv:
+                    try:
+                        await self.tv.select_image(content_id, show=True)
+                        dashboard_selected = True
+                        logger.info(f"Selected dashboard image {CURRENT_DASHBOARD_IMAGE} "
+                                    f"on TV {self.tv_ip}")
+                    except Exception as e:
+                        logger.warning(f"Failed to select dashboard image on TV {self.tv_ip}: {e}")
+                else:
+                    kept = {name for name in to_delete if dashboard.is_dashboard_image(name)}
+                    if kept:
+                        logger.warning(
+                            f"This cycle's dashboard render is not on TV {self.tv_ip}, so the "
+                            f"previous one stays: deleting it would leave the frame with nothing "
+                            f"to show. Will retry next cycle."
+                        )
+                        to_delete = to_delete - kept
 
             # Delete removed images (batch delete for efficiency)
             if to_delete:
@@ -1006,7 +1083,18 @@ class TVArtworkSync:
                         import random
                         # Use desired settings if available, otherwise preserved settings for shuffle check
                         settings_for_mode = desired_slideshow_settings or preserve_slideshow_settings
-                        if settings_for_mode and settings_for_mode.get('type') == 'shuffleslideshow':
+                        if dashboard_selected:
+                            # Already selected above, before the old render was deleted.
+                            content_id = None
+                        elif CURRENT_DASHBOARD_IMAGE in verified_mapping:
+                            # Dashboard mode where the early selection didn't
+                            # happen (e.g. it failed); try again now.
+                            content_id = verified_mapping[CURRENT_DASHBOARD_IMAGE]
+                            if DRY_RUN:
+                                logger.info(f"[DRY RUN] Would select dashboard image on TV {self.tv_ip}")
+                            else:
+                                logger.info(f"Selecting dashboard image on TV {self.tv_ip}")
+                        elif settings_for_mode and settings_for_mode.get('type') == 'shuffleslideshow':
                             content_id = random.choice(list(verified_mapping.values()))
                             if DRY_RUN:
                                 logger.info(f"[DRY RUN] Would select random image on TV {self.tv_ip} for shuffle mode")
@@ -1019,7 +1107,7 @@ class TVArtworkSync:
                             else:
                                 logger.info(f"Selecting first image on TV {self.tv_ip} to prevent default art")
 
-                        if not DRY_RUN:
+                        if content_id and not DRY_RUN:
                             await self.tv.select_image(content_id, show=True)
 
                         # Restore preserved slideshow settings (when no override is set)
@@ -1078,7 +1166,17 @@ async def wait_until_next_sync(tvs_to_keepalive: List['TVArtworkSync']) -> None:
     elapsed = 0
     while elapsed < sync_interval_seconds:
         chunk = min(KEEPALIVE_INTERVAL, sync_interval_seconds - elapsed)
-        await asyncio.sleep(chunk)
+        if WAKE_EVENT is not None:
+            # Sleep, but return early if the web UI asks for an immediate sync.
+            try:
+                await asyncio.wait_for(WAKE_EVENT.wait(), timeout=chunk)
+                WAKE_EVENT.clear()
+                logger.info("Immediate sync requested from the web UI")
+                return
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await asyncio.sleep(chunk)
         elapsed += chunk
         if elapsed < sync_interval_seconds:
             for tv_sync in tvs_to_keepalive:
@@ -1090,6 +1188,59 @@ async def wait_until_next_sync(tvs_to_keepalive: List['TVArtworkSync']) -> None:
                     logger.debug(f"Keepalive ping OK for TV {tv_sync.tv_ip}")
                 except Exception as e:
                     logger.debug(f"Keepalive ping failed for TV {tv_sync.tv_ip}: {e}")
+
+
+def request_immediate_sync() -> bool:
+    """
+    Ask the sync loop to stop waiting and run now. Safe to call from the web
+    UI's thread; returns False if the loop isn't up yet.
+    """
+    if WAKE_EVENT is None or EVENT_LOOP is None:
+        return False
+    EVENT_LOOP.call_soon_threadsafe(WAKE_EVENT.set)
+    return True
+
+
+def refresh_dashboard_image(settings: Dict[str, Any]) -> Optional[str]:
+    """
+    Render this cycle's dashboard image into the artwork directory.
+
+    Failures are non-fatal: the previous render stays on the wall and we try
+    again next cycle.
+    """
+    global CURRENT_DASHBOARD_IMAGE
+
+    if settings['latitude'] is None or settings['longitude'] is None:
+        logger.warning("Dashboard is enabled but has no coordinates; skipping its refresh")
+        return CURRENT_DASHBOARD_IMAGE
+
+    if DRY_RUN:
+        logger.info("[DRY RUN] Would render a new dashboard image")
+        return CURRENT_DASHBOARD_IMAGE
+
+    try:
+        import dashboard
+        CURRENT_DASHBOARD_IMAGE = dashboard.refresh(
+            dest_dir=Path(ARTWORK_DIR),
+            latitude=settings['latitude'],
+            longitude=settings['longitude'],
+            timezone=settings['timezone'],
+            location_name=settings['location_name'],
+            units=settings['units'],
+            time_format=settings['time_format'],
+            size=(settings['width'], settings['height']),
+            hours_ahead=settings['forecast_hours'],
+            forecast_days=settings['forecast_days'],
+            background=settings['background'],
+            corner=settings['corner'],
+            card_scale=settings['card_scale'],
+            card_hours=settings['card_hours'],
+            image_format=settings['image_format'],
+        )
+    except Exception as e:
+        logger.warning(f"Dashboard refresh failed: {type(e).__name__}: {e}")
+
+    return CURRENT_DASHBOARD_IMAGE
 
 
 async def sync_all_tvs() -> None:
@@ -1136,6 +1287,10 @@ async def sync_all_tvs() -> None:
         await asyncio.gather(*[tv.close() for tv in tv_syncs])
         await wait_until_next_sync([])
         return
+
+    dashboard_config = dashboard_settings.get()
+    if dashboard_config['enabled']:
+        refresh_dashboard_image(dashboard_config)
 
     local_images = await tvs_in_art_mode[0].get_local_images()
     await asyncio.gather(*[tv.sync(local_images) for tv in tvs_in_art_mode])
@@ -1186,7 +1341,36 @@ async def main() -> None:
     logger.info(f"TV IPs: {', '.join(TV_IPS) if TV_IPS else 'None configured'}")
     logger.info(f"Sync interval: {SYNC_INTERVAL_MINUTES} minutes")
     logger.info(f"Matte style: {MATTE_STYLE}")
+    settings = dashboard_settings.get()
+    if settings['enabled']:
+        logger.info(f"Dashboard: enabled ({settings['width']}x{settings['height']}, "
+                    f"{settings['units']}, card in the {settings['corner']} corner, "
+                    f"refreshed every {SYNC_INTERVAL_MINUTES} min)")
+        try:
+            import dashboard_icons
+            found, referenced = dashboard_icons.available()
+            if found < referenced:
+                logger.warning(f"Weather icons: only {found}/{referenced} found in "
+                               f"{dashboard_icons.ICON_DIR} — the missing ones fall back to "
+                               f"simple drawn glyphs")
+            else:
+                logger.info(f"Weather icons: {found} Meteocons loaded")
+        except Exception as e:
+            logger.warning(f"Weather icons unavailable ({type(e).__name__}); using drawn glyphs")
+    else:
+        logger.info("Dashboard: disabled")
     logger.info("=" * 60)
+
+    global WAKE_EVENT, EVENT_LOOP
+    WAKE_EVENT = asyncio.Event()
+    EVENT_LOOP = asyncio.get_running_loop()
+
+    if WEB_UI_ENABLED:
+        try:
+            import web_ui
+            web_ui.start(WEB_UI_HOST, WEB_UI_PORT)
+        except Exception as e:
+            logger.warning(f"Web UI failed to start: {type(e).__name__}: {e}")
 
     if not TV_IPS:
         logger.error("No TV IPs configured. Exiting.")
@@ -1223,6 +1407,54 @@ if __name__ == '__main__':
                 BRIGHTNESS_MAX,
                 brightness_from_elevation
             )
+            sys.exit(0)
+        elif sys.argv[1] == '--test-dashboard':
+            # Render one dashboard image to a local file and exit. No TV needed,
+            # so you can check the card before pointing it at the wall.
+            settings = dashboard_settings.get()
+            if settings['latitude'] is None or settings['longitude'] is None:
+                logger.error("Set LOCATION_LATITUDE and LOCATION_LONGITUDE to test the dashboard.")
+                sys.exit(1)
+
+            output = Path(sys.argv[2]) if len(sys.argv) > 2 else Path('dashboard-preview.png')
+            import dashboard
+            from dashboard_render import render
+            from dashboard_weather import fetch_weather
+
+            weather = fetch_weather(
+                latitude=settings['latitude'],
+                longitude=settings['longitude'],
+                timezone=settings['timezone'],
+                location_name=settings['location_name'],
+                units=settings['units'],
+                use_24h=settings['time_format'] != '12h',
+                hours_ahead=max(settings['forecast_hours'], settings['card_hours']),
+                forecast_days=settings['forecast_days'],
+            )
+            if weather is None:
+                logger.error("Could not fetch weather data.")
+                sys.exit(1)
+
+            try:
+                tz = zoneinfo.ZoneInfo(settings['timezone'])
+            except Exception:
+                logger.warning(f"Unknown timezone {settings['timezone']!r}, using UTC")
+                tz = datetime.timezone.utc
+            now = datetime.datetime.now(tz)
+            clock = '%H:%M' if settings['time_format'] != '12h' else '%I:%M %p'
+
+            render(
+                weather,
+                output,
+                size=(settings['width'], settings['height']),
+                date_text=now.strftime('%A, %d %B %Y'),
+                updated_text=now.strftime(clock).lstrip('0'),
+                background=dashboard.pick_background(settings['background']),
+                corner=settings['corner'],
+                scale=settings['card_scale'],
+                hours=settings['card_hours'],
+            )
+            logger.info(f"Wrote {output} ({output.stat().st_size // 1024} KB)")
             sys.exit(0)
         elif sys.argv[1] == '--dry-run':
             # Enable dry run mode
