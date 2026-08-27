@@ -1236,6 +1236,8 @@ def refresh_dashboard_image(settings: Dict[str, Any]) -> Optional[str]:
             card_scale=settings['card_scale'],
             card_hours=settings['card_hours'],
             image_format=settings['image_format'],
+            show_updated=settings['show_updated'],
+            template_minutes=settings['template_minutes'],
         )
     except Exception as e:
         logger.warning(f"Dashboard refresh failed: {type(e).__name__}: {e}")
@@ -1449,7 +1451,8 @@ if __name__ == '__main__':
                 size=(settings['width'], settings['height']),
                 date_text=now.strftime('%A, %d %B %Y'),
                 updated_text=now.strftime(clock).lstrip('0'),
-                background=dashboard.pick_background(settings['background']),
+                background=dashboard.pick_background(settings['background'],
+                                                    settings['template_minutes']),
                 corner=settings['corner'],
                 scale=settings['card_scale'],
                 hours=settings['card_hours'],

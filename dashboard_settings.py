@@ -44,6 +44,8 @@ FIELDS: Dict[str, Tuple[str, Any]] = {
     'card_scale': ('float', (0.4, 2.5)),
     'card_hours': ('int', (0, 8)),
     'image_format': ('choice', IMAGE_FORMATS),
+    'show_updated': ('bool', None),
+    'template_minutes': ('int', (1, 1440)),
 }
 
 
@@ -75,6 +77,9 @@ def env_defaults() -> Dict[str, Any]:
         'card_scale': float(os.getenv('DASHBOARD_CARD_SCALE', '1.0')),
         'card_hours': int(os.getenv('DASHBOARD_CARD_HOURS', '4')),
         'image_format': os.getenv('DASHBOARD_IMAGE_FORMAT', 'jpg').lower(),
+        'show_updated': os.getenv('DASHBOARD_SHOW_UPDATED', 'true').lower()
+                        in ('true', '1', 'yes'),
+        'template_minutes': int(os.getenv('DASHBOARD_TEMPLATE_MINUTES', '60')),
     }
 
 

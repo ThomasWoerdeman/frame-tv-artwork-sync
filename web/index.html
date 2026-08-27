@@ -123,6 +123,20 @@
           <select id="card_hours"></select>
         </div>
       </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="template_minutes">Change template every (min)</label>
+          <input type="number" id="template_minutes" min="1" max="1440" step="1">
+        </div>
+        <div class="field">
+          <label>Timestamp</label>
+          <label class="switch" style="padding-top:6px">
+            <input type="checkbox" id="show_updated"> Show the time on the card
+          </label>
+        </div>
+      </div>
+      <p class="hint" id="upload-note"></p>
     </section>
 
     <section>
@@ -242,6 +256,8 @@ function refreshPreview() {
       corner: state.settings.corner,
       card_scale: state.settings.card_scale,
       card_hours: state.settings.card_hours,
+      show_updated: state.settings.show_updated,
+      template_minutes: state.settings.template_minutes,
       t: Date.now(),
     });
     const wrap = $('preview-wrap');
@@ -282,6 +298,11 @@ function render() {
   $('card_scale').value = s.card_scale;
   $('scale-value').textContent = Math.round(s.card_scale * 100) + '%';
   $('card_hours').value = String(s.card_hours);
+  $('template_minutes').value = s.template_minutes;
+  $('show_updated').checked = s.show_updated;
+  $('upload-note').textContent = s.show_updated
+    ? 'With the time shown, the card changes every minute — so every sync cycle uploads a new image to the TV.'
+    : 'Without the time, the card only changes when the weather does, so most sync cycles upload nothing.';
 
   document.querySelectorAll('.corner').forEach(button => {
     button.dataset.active = button.dataset.corner === s.corner ? '1' : '0';
@@ -347,6 +368,11 @@ $('card_scale').oninput = e => {
 };
 $('card_scale').onchange = e => save({ card_scale: parseFloat(e.target.value) });
 $('card_hours').onchange = e => save({ card_hours: parseInt(e.target.value, 10) });
+$('show_updated').onchange = e => save({ show_updated: e.target.checked });
+$('template_minutes').onchange = e => {
+  if (e.target.value === '') return;
+  save({ template_minutes: parseInt(e.target.value, 10) });
+};
 $('units').onchange = e => save({ units: e.target.value });
 $('time_format').onchange = e => save({ time_format: e.target.value });
 

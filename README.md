@@ -91,6 +91,9 @@ All settings are configured via environment variables:
 | `DASHBOARD_CORNER`         | `top-left`, `top-right`, `bottom-left`, `bottom-right`                                     | `bottom-right` |
 | `DASHBOARD_CARD_SCALE`     | Card size multiplier (0.4–2.5)                                                            | `1.0`     |
 | `DASHBOARD_CARD_HOURS`     | Hours shown on the card (`0` to hide the strip)                                            | `4`       |
+| `DASHBOARD_SHOW_UPDATED`   | Show the time on the card (see [Refresh rate](#refresh-rate))                              | `true`    |
+| `DASHBOARD_TEMPLATE_MINUTES` | How long each template image stays on screen                                            | `60`      |
+| `WEATHER_CACHE_SECONDS`    | How long weather data is reused between renders                                           | `600`     |
 | `DASHBOARD_IMAGE_FORMAT`   | `jpg` (small, quick uploads) or `png` (lossless, ~5x larger)                                | `jpg`     |
 | `DASHBOARD_JPEG_QUALITY`   | JPEG quality when the format is `jpg`                                                     | `92`      |
 | `DASHBOARD_UNITS`          | `metric` (°C, km/h) or `imperial` (°F, mph)                                                | `metric`  |
@@ -247,8 +250,35 @@ Notes:
   always the image selected for display.
 - If the weather API is unreachable, the previous render stays on the wall and
   the next cycle tries again — no error card, no blank frame.
-- Sync intervals below 5 minutes gain little: Open-Meteo updates roughly every
-  15 minutes, and each refresh is a full-resolution upload to the TV.
+- Template rotation is on its own clock (`DASHBOARD_TEMPLATE_MINUTES`, default
+  hourly), independent of the sync interval — so a fast refresh doesn't make the
+  artwork flicker.
+
+#### Refresh rate
+
+`SYNC_INTERVAL_MINUTES=1` is fine. Two things keep it cheap:
+
+- **Weather data is cached** (`WEATHER_CACHE_SECONDS`, default 10 minutes).
+  Open-Meteo only refreshes every ~15 minutes, so a 1-minute sync would
+  otherwise ask 10 times for identical numbers.
+- **Unchanged renders are skipped.** Each render is compared against the last
+  one; if nothing visible differs, the existing image stays and the sync finds
+  nothing to upload, select, or delete. The TV is left completely alone.
+
+That leaves one decision — the timestamp on the card:
+
+| `DASHBOARD_SHOW_UPDATED` | At a 1-minute interval | Cost |
+| --- | --- | --- |
+| `true` (default) | The card is a live clock | One ~2 MB upload per minute |
+| `false` | The card changes only when the weather does | Roughly one upload per 15 minutes |
+
+If you want the clock, leave it on — a minute of upload traffic is small, and the
+replace cycle keeps exactly one image on the TV. If you'd rather spare the TV's
+flash, turn it off and you still get weather that's never more than a minute
+stale. The toggle is in the web UI.
+
+One caveat with a clock: a cycle takes ~10 seconds of work on top of the wait, so
+the displayed time can occasionally skip a minute.
 
 ### Web UI
 
