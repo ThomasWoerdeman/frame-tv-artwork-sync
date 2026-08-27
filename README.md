@@ -305,6 +305,30 @@ The UI is **unauthenticated**, like the rest of this service: keep it on your
 LAN and don't port-forward it. Set `WEB_UI_ENABLED=false` to turn it off, or
 drop the `ports:` mapping to keep it inside the Docker network.
 
+### When the dashboard says weather is unavailable
+
+The web UI's Status section has a **Run checks** button. It reports, in order,
+what actually breaks in a container: DNS, a live call to the weather API, the
+icon assets, whether the settings folder is writable, and how many templates it
+can see. The Status line also shows the last weather error, or how long ago the
+last successful fetch was.
+
+The most common cause is that the container has no working DNS — the UI loads
+fine on your LAN while `api.open-meteo.com` cannot be resolved. To check from
+the host:
+
+```bash
+docker exec <container> python -c "import socket; print(socket.gethostbyname('api.open-meteo.com'))"
+```
+
+On unRAID, that usually means the container is on a custom network without a
+resolver. Either switch it to `bridge`, or set a DNS server on the container
+(Docker's `--dns 1.1.1.1`, or the DNS field in the container template), or fix
+the host's DNS under Settings → Network Settings.
+
+Whatever the cause, the previous render stays on the TV — a failed fetch never
+blanks the frame or puts an error card on the wall.
+
 ### Image Cleanup Control
 
 **`REMOVE_UNKNOWN_IMAGES`** - Controls whether the script removes images from your TV that aren't in your local artwork folder.

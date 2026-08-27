@@ -81,6 +81,15 @@
   dl.status dt { color: var(--dim); }
   dl.status dd { margin: 0; font-variant-numeric: tabular-nums; }
 
+  .checks { display: grid; gap: 8px; margin: 0 0 18px; }
+  .check { display: flex; gap: 10px; align-items: baseline; font-size: 14px;
+           background: var(--panel-2); border: 1px solid var(--line);
+           border-left: 3px solid var(--line); border-radius: 8px; padding: 9px 12px; }
+  .check.ok { border-left-color: #6cc08b; }
+  .check.bad { border-left-color: var(--bad); }
+  .check b { font-weight: 700; min-width: 130px; color: var(--muted); }
+  .check span { color: var(--text); }
+
   #toast {
     position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 30px);
     background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
@@ -198,13 +207,16 @@
 
   <section>
     <h2>Status</h2>
+    <div id="diagnostics"></div>
     <dl class="status">
       <dt>TVs</dt><dd id="s-tvs">–</dd>
       <dt>Sync interval</dt><dd id="s-interval">–</dd>
       <dt>Current image</dt><dd id="s-image">–</dd>
       <dt>Rendered</dt><dd id="s-rendered">–</dd>
       <dt>Templates</dt><dd id="s-templates">–</dd>
+      <dt>Weather</dt><dd id="s-weather">–</dd>
     </dl>
+    <p style="margin:16px 0 0"><button id="run-checks">Run checks</button></p>
   </section>
 </main>
 
@@ -332,6 +344,11 @@ function render() {
   $('s-image').textContent = state.sync.current_image || 'nothing rendered yet';
   $('s-rendered').textContent = ago(state.sync.rendered_at);
   $('s-templates').textContent = state.templates.length + ' in rotation';
+  const w = state.weather || {};
+  $('s-weather').textContent = w.last_error
+    ? w.last_error
+    : (w.last_success ? 'ok, fetched ' + ago(w.last_success) : 'not fetched yet');
+  $('s-weather').style.color = w.last_error ? 'var(--bad)' : '';
   $('sync-now').disabled = !state.sync.can_sync_now;
 }
 
@@ -399,6 +416,34 @@ $('upload').onchange = async e => {
   }
   await load();
   refreshPreview();
+};
+
+const CHECK_LABELS = {
+  dns: 'DNS', weather_api: 'Weather API', icons: 'Icons',
+  config_writable: 'Settings folder', templates: 'Templates',
+};
+
+$('run-checks').onclick = async () => {
+  const box = $('diagnostics');
+  box.innerHTML = '<p class="hint">Running checks…</p>';
+  try {
+    const body = await api('/api/diagnostics');
+    box.innerHTML = '<div class="checks"></div>';
+    const list = box.firstChild;
+    for (const [key, result] of Object.entries(body.checks)) {
+      const row = document.createElement('div');
+      row.className = 'check ' + (result.ok ? 'ok' : 'bad');
+      const label = document.createElement('b');
+      label.textContent = CHECK_LABELS[key] || key;
+      const detail = document.createElement('span');
+      detail.textContent = result.detail;
+      row.append(label, detail);
+      list.appendChild(row);
+    }
+  } catch (e) {
+    box.innerHTML = '';
+    toast(e.message, true);
+  }
 };
 
 $('sync-now').onclick = async () => {
