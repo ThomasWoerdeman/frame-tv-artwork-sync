@@ -1,2 +1,4 @@
 git+https://github.com/NickWaterton/samsung-tv-ws-api.git
 pysolar
+Pillow
+Flask

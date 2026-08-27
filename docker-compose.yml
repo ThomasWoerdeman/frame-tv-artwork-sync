@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   frame-tv-sync:
-    image: turley/frame-tv-artwork-sync
+    image: ghcr.io/thomaswoerdeman/frame-tv-dashboard:latest
     restart: unless-stopped
     environment:
       # Comma-separated list of TV IP addresses
@@ -32,6 +32,28 @@ services:
       # BRIGHTNESS_MIN: "2"
       # BRIGHTNESS_MAX: "10"
 
+      # Optional: Dashboard Mode
+      # Composites a small live weather card onto a template image and shows it on the
+      # TV, refreshed every SYNC_INTERVAL_MINUTES. Data comes from Open-Meteo (no API
+      # key). Keep the slideshow off so the TV stays on the dashboard.
+      # These are defaults; the web UI's settings (in /config) override them.
+      # DASHBOARD_ENABLED: "true"
+      # DASHBOARD_LOCATION_NAME: "Amsterdam"
+      # DASHBOARD_BACKGROUND: "/templates"   # File, or folder to rotate through
+      # DASHBOARD_CORNER: "bottom-right"
+      # DASHBOARD_CARD_SCALE: "1.0"
+      # DASHBOARD_CARD_HOURS: "4"
+      # DASHBOARD_IMAGE_FORMAT: "jpg"        # jpg (small, fast) or png
+      # DASHBOARD_UNITS: "metric"            # metric or imperial
+      # DASHBOARD_TIME_FORMAT: "24h"         # 24h or 12h
+      # LOCATION_LATITUDE: "52.3676"         # Required by dashboard mode
+      # LOCATION_LONGITUDE: "4.9041"
+      # LOCATION_TIMEZONE: "Europe/Amsterdam"
+
+      # Optional: Web UI (on by default at http://<host>:8080)
+      # WEB_UI_ENABLED: "true"
+      # WEB_UI_PORT: "8080"
+
       # Cleanup Control: Remove images from TV that aren't in the artwork folder
       # When true, ensures TV only shows images from your local folder
       # When false, preserves any existing images already on the TV
@@ -46,9 +68,18 @@ services:
       # Requires LOCATION_TIMEZONE to be set.
       # AUTO_OFF_TIME: "22:00"        # Time to turn off (24-hour format)
       # AUTO_OFF_GRACE_HOURS: "2"     # Hours after AUTO_OFF_TIME to keep trying
+    ports:
+      # Web UI — remove this line to keep it off the network
+      - "8080:8080"
     volumes:
       # Map your local artwork folder to /artwork in container
       - ./artwork:/artwork
+
+      # Template images the dashboard card is drawn on
+      - ./templates:/templates
+
+      # Dashboard settings saved from the web UI
+      - ./config:/config
 
       # Persist TV authentication tokens
       - ./tokens:/tokens

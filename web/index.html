@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frame TV Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1017; --panel: #151a24; --panel-2: #1c2230; --line: #262e3d;
+    --text: #e8ecf3; --muted: #97a1b4; --dim: #6b7688;
+    --accent: #e8c07d; --accent-ink: #2a1f0c; --rain: #82baec; --bad: #e88080;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 20px 28px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  h1 { font-size: 17px; margin: 0; letter-spacing: .04em; text-transform: uppercase; }
+  h2 { font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+       color: var(--dim); margin: 0 0 14px; font-weight: 700; }
+  .spacer { flex: 1; }
+  main { max-width: 1180px; margin: 0 auto; padding: 28px; display: grid; gap: 22px; }
+  .grid { display: grid; gap: 22px; grid-template-columns: 1.4fr 1fr; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
+
+  button, .btn {
+    font: inherit; font-weight: 600; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 9px; padding: 9px 15px; cursor: pointer;
+  }
+  button:hover { border-color: #3a4658; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  button.primary:hover { filter: brightness(1.07); }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+
+  .switch { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+  .switch input { width: 18px; height: 18px; accent-color: var(--accent); }
+
+  /* Preview with clickable corner targets */
+  .preview { position: relative; border-radius: 10px; overflow: hidden; background: #000;
+             aspect-ratio: 16 / 9; }
+  .preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .preview.loading img { opacity: .45; }
+  .corner {
+    position: absolute; width: 30%; height: 34%; border: 2px dashed transparent;
+    border-radius: 10px; background: transparent; cursor: pointer; padding: 0;
+  }
+  .corner:hover { border-color: rgba(232,192,125,.75); background: rgba(232,192,125,.08); }
+  .corner[data-active="1"] { border-color: var(--accent); background: rgba(232,192,125,.13); }
+  .corner.tl { left: 3%; top: 4%; } .corner.tr { right: 3%; top: 4%; }
+  .corner.bl { left: 3%; bottom: 4%; } .corner.br { right: 3%; bottom: 4%; }
+  .hint { color: var(--dim); font-size: 13px; margin: 12px 0 0; }
+
+  .row { display: grid; gap: 14px; grid-template-columns: repeat(2, 1fr); }
+  .field { display: grid; gap: 6px; margin-bottom: 14px; }
+  label { font-size: 12px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+  input[type=text], input[type=number], select {
+    font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; width: 100%;
+  }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .value { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .templates { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .tile { position: relative; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); background: var(--panel-2); }
+  .tile img { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; }
+  .tile figcaption { font-size: 12px; color: var(--muted); padding: 7px 9px; overflow: hidden;
+                     text-overflow: ellipsis; white-space: nowrap; }
+  .tile button { position: absolute; top: 7px; right: 7px; padding: 3px 9px; font-size: 12px;
+                 background: rgba(10,12,18,.8); }
+  .empty { color: var(--dim); font-size: 14px; }
+
+  dl.status { display: grid; grid-template-columns: auto 1fr; gap: 8px 18px; margin: 0; font-size: 14px; }
+  dl.status dt { color: var(--dim); }
+  dl.status dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 30px);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 11px 18px; font-weight: 600; opacity: 0; pointer-events: none;
+    transition: opacity .18s, transform .18s; z-index: 20; max-width: 90vw;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #toast.error { border-color: var(--bad); color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Frame TV Dashboard</h1>
+  <label class="switch"><input type="checkbox" id="enabled"> Dashboard mode</label>
+  <span class="spacer"></span>
+  <button id="sync-now" class="primary">Sync to TV now</button>
+</header>
+
+<main>
+  <div class="grid">
+    <section>
+      <h2>Preview</h2>
+      <div class="preview" id="preview-wrap">
+        <img id="preview" alt="Dashboard preview">
+        <button class="corner tl" data-corner="top-left" title="Place card top left"></button>
+        <button class="corner tr" data-corner="top-right" title="Place card top right"></button>
+        <button class="corner bl" data-corner="bottom-left" title="Place card bottom left"></button>
+        <button class="corner br" data-corner="bottom-right" title="Place card bottom right"></button>
+      </div>
+      <p class="hint">Click a corner to move the card. The preview shows the next template in
+        rotation, rendered at reduced size.</p>
+
+      <div class="row" style="margin-top:18px">
+        <div class="field">
+          <label for="card_scale">Card size <span class="value" id="scale-value"></span></label>
+          <input type="range" id="card_scale" min="0.4" max="2.5" step="0.05">
+        </div>
+        <div class="field">
+          <label for="card_hours">Hours on the card</label>
+          <select id="card_hours"></select>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Location</h2>
+      <div class="field">
+        <label for="location_name">Name shown on the card</label>
+        <input type="text" id="location_name" placeholder="Amsterdam">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="latitude">Latitude</label>
+          <input type="number" id="latitude" step="0.0001" placeholder="52.3676">
+        </div>
+        <div class="field">
+          <label for="longitude">Longitude</label>
+          <input type="number" id="longitude" step="0.0001" placeholder="4.9041">
+        </div>
+      </div>
+      <div class="field">
+        <label for="timezone">Timezone</label>
+        <input type="text" id="timezone" placeholder="Europe/Amsterdam">
+      </div>
+
+      <h2 style="margin-top:24px">Display</h2>
+      <div class="row">
+        <div class="field">
+          <label for="units">Units</label>
+          <select id="units"></select>
+        </div>
+        <div class="field">
+          <label for="time_format">Clock</label>
+          <select id="time_format"></select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="width">Panel width</label>
+          <input type="number" id="width" step="10">
+        </div>
+        <div class="field">
+          <label for="height">Panel height</label>
+          <input type="number" id="height" step="10">
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section>
+    <h2>Template images</h2>
+    <div class="templates" id="templates"></div>
+    <p class="empty" id="templates-empty" hidden>No templates yet — the card renders on a plain
+      dark background until you add one.</p>
+    <p style="margin:16px 0 0">
+      <label class="btn" for="upload">Upload image</label>
+      <input type="file" id="upload" accept="image/jpeg,image/png,image/webp" hidden multiple>
+      <span class="hint" id="template-dir"></span>
+    </p>
+  </section>
+
+  <section>
+    <h2>Status</h2>
+    <dl class="status">
+      <dt>TVs</dt><dd id="s-tvs">–</dd>
+      <dt>Sync interval</dt><dd id="s-interval">–</dd>
+      <dt>Current image</dt><dd id="s-image">–</dd>
+      <dt>Rendered</dt><dd id="s-rendered">–</dd>
+      <dt>Templates</dt><dd id="s-templates">–</dd>
+    </dl>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = null;          // last /api/status payload
+let previewTimer = null;
+
+function toast(message, isError) {
+  const box = $('toast');
+  box.textContent = message;
+  box.className = 'show' + (isError ? ' error' : '');
+  clearTimeout(box._timer);
+  box._timer = setTimeout(() => { box.className = ''; }, isError ? 5200 : 2400);
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const type = response.headers.get('content-type') || '';
+  const body = type.includes('json') ? await response.json() : {};
+  if (!response.ok) throw new Error(body.error || ('Request failed: ' + response.status));
+  return body;
+}
+
+function fillSelect(select, values, labels) {
+  select.innerHTML = '';
+  values.forEach((value, i) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = labels ? labels[i] : value;
+    select.appendChild(option);
+  });
+}
+
+function ago(epochSeconds) {
+  if (!epochSeconds) return 'never';
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - epochSeconds));
+  if (seconds < 60) return seconds + 's ago';
+  if (seconds < 3600) return Math.floor(seconds / 60) + ' min ago';
+  return Math.floor(seconds / 3600) + ' h ago';
+}
+
+function refreshPreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => {
+    const params = new URLSearchParams({
+      corner: state.settings.corner,
+      card_scale: state.settings.card_scale,
+      card_hours: state.settings.card_hours,
+      t: Date.now(),
+    });
+    const wrap = $('preview-wrap');
+    wrap.classList.add('loading');
+    const image = $('preview');
+    image.onload = image.onerror = () => wrap.classList.remove('loading');
+    image.src = '/api/preview.png?' + params;
+  }, 220);
+}
+
+async function save(patch, { preview = true } = {}) {
+  try {
+    const body = await api('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    state.settings = body.settings;
+    render();
+    if (preview) refreshPreview();
+  } catch (e) {
+    toast(e.message, true);
+    await load();
+  }
+}
+
+function render() {
+  const s = state.settings;
+  $('enabled').checked = s.enabled;
+  $('location_name').value = s.location_name || '';
+  $('latitude').value = s.latitude ?? '';
+  $('longitude').value = s.longitude ?? '';
+  $('timezone').value = s.timezone || '';
+  $('units').value = s.units;
+  $('time_format').value = s.time_format;
+  $('width').value = s.width;
+  $('height').value = s.height;
+  $('card_scale').value = s.card_scale;
+  $('scale-value').textContent = Math.round(s.card_scale * 100) + '%';
+  $('card_hours').value = String(s.card_hours);
+
+  document.querySelectorAll('.corner').forEach(button => {
+    button.dataset.active = button.dataset.corner === s.corner ? '1' : '0';
+  });
+
+  const list = $('templates');
+  list.innerHTML = '';
+  state.templates.forEach(name => {
+    const tile = document.createElement('figure');
+    tile.className = 'tile';
+    tile.innerHTML =
+      '<img loading="lazy" src="/api/templates/' + encodeURIComponent(name) + '" alt="">' +
+      '<figcaption></figcaption><button class="danger" title="Delete">✕</button>';
+    tile.querySelector('figcaption').textContent = name;
+    tile.querySelector('button').onclick = () => remove(name);
+    list.appendChild(tile);
+  });
+  $('templates-empty').hidden = state.templates.length > 0;
+  $('template-dir').textContent = state.can_upload
+    ? 'Saved to ' + state.template_dir
+    : 'The template path points at a single file, so uploads are disabled.';
+  $('upload').disabled = !state.can_upload;
+
+  $('s-tvs').textContent = state.sync.tv_ips.length ? state.sync.tv_ips.join(', ') : 'none configured';
+  $('s-interval').textContent = state.sync.interval_minutes
+    ? 'every ' + state.sync.interval_minutes + ' min' : '–';
+  $('s-image').textContent = state.sync.current_image || 'nothing rendered yet';
+  $('s-rendered').textContent = ago(state.sync.rendered_at);
+  $('s-templates').textContent = state.templates.length + ' in rotation';
+  $('sync-now').disabled = !state.sync.can_sync_now;
+}
+
+async function load() {
+  state = await api('/api/status');
+  fillSelect($('units'), state.units, ['Metric (°C, km/h)', 'Imperial (°F, mph)']);
+  fillSelect($('time_format'), state.time_formats, ['24-hour', '12-hour']);
+  fillSelect($('card_hours'), ['0', '2', '3', '4', '5', '6', '8'],
+             ['None', '2 hours', '3 hours', '4 hours', '5 hours', '6 hours', '8 hours']);
+  render();
+}
+
+async function remove(name) {
+  if (!confirm('Delete template "' + name + '"?')) return;
+  try {
+    await api('/api/templates/' + encodeURIComponent(name), { method: 'DELETE' });
+    toast('Deleted ' + name);
+    await load();
+    refreshPreview();
+  } catch (e) { toast(e.message, true); }
+}
+
+// --- wiring ---------------------------------------------------------------- //
+
+document.querySelectorAll('.corner').forEach(button => {
+  button.onclick = () => save({ corner: button.dataset.corner });
+});
+
+$('enabled').onchange = e => save({ enabled: e.target.checked }, { preview: false })
+  .then(() => toast(e.target.checked ? 'Dashboard mode on' : 'Dashboard mode off'));
+
+$('card_scale').oninput = e => {
+  $('scale-value').textContent = Math.round(e.target.value * 100) + '%';
+};
+$('card_scale').onchange = e => save({ card_scale: parseFloat(e.target.value) });
+$('card_hours').onchange = e => save({ card_hours: parseInt(e.target.value, 10) });
+$('units').onchange = e => save({ units: e.target.value });
+$('time_format').onchange = e => save({ time_format: e.target.value });
+
+['location_name', 'timezone'].forEach(id => {
+  $(id).onchange = e => save({ [id]: e.target.value });
+});
+['latitude', 'longitude', 'width', 'height'].forEach(id => {
+  $(id).onchange = e => {
+    if (e.target.value === '') return;
+    save({ [id]: parseFloat(e.target.value) });
+  };
+});
+
+$('upload').onchange = async e => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  for (const file of files) {
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const body = await api('/api/templates', { method: 'POST', body: form });
+      toast('Uploaded ' + body.name);
+    } catch (err) { toast(err.message, true); }
+  }
+  await load();
+  refreshPreview();
+};
+
+$('sync-now').onclick = async () => {
+  try {
+    await api('/api/sync-now', { method: 'POST' });
+    toast('Syncing to the TV now');
+  } catch (e) { toast(e.message, true); }
+};
+
+load().then(refreshPreview).catch(e => toast(e.message, true));
+// Keep the status block honest about render age without touching the form.
+setInterval(() => { if (state) api('/api/status').then(s => { state.sync = s.sync; render(); }); }, 20000);
+</script>
+</body>
+</html>
