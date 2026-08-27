@@ -2,8 +2,8 @@
 """
 Renders the dashboard image shown on the Frame TV.
 
-The output is a template/background image with a small frosted weather card in
-one corner — the picture stays the picture, the data sits quietly on top of it.
+The output is a template/background image with a small weather overlay in one
+corner — the picture stays the picture, the data sits quietly on top of it.
 Everything is drawn with Pillow primitives (icons included), so the container
 needs no browser and no icon assets.
 """
@@ -21,15 +21,15 @@ from dashboard_weather import Weather
 
 logger = logging.getLogger(__name__)
 
-# Palette. The card sits on unknown imagery, so text is white-ish on a dark
-# scrim and accents stay muted enough not to fight the artwork.
+# Palette. The overlay sits on unknown imagery, so text is white-ish and a soft
+# shadow supplies contrast without putting the data inside a visible card.
 TEXT = (255, 255, 255)
 MUTED = (206, 212, 224)
 DIM = (166, 175, 191)
 RAIN = (130, 186, 236)
-SCRIM = (12, 15, 22)          # card tint, applied at CARD_OPACITY
-CARD_OPACITY = 150            # 0-255 over the blurred backdrop
-CARD_BLUR = 0.012             # blur radius as a fraction of card height
+SHADOW_OPACITY = 155          # 0-255; enough contrast without a visible panel
+SHADOW_BLUR = 0.012           # blur radius as a fraction of overlay height
+SHADOW_OFFSET = 0.008         # downward offset as a fraction of overlay height
 
 # Fallback background when no template image is configured or readable.
 BG_TOP = (14, 18, 30)
@@ -140,30 +140,6 @@ def _card_box(size: Tuple[int, int], corner: str, scale: float,
     return int(x0), int(y0), int(x0 + card_w), int(y0 + card_h)
 
 
-def _frost(base: Image.Image, box: Tuple[int, int, int, int], radius: int) -> None:
-    """Blur and tint the area under the card so text stays readable on any image."""
-    x0, y0, x1, y1 = box
-    region = base.crop(box)
-    blur = max(1, int((y1 - y0) * CARD_BLUR))
-    region = region.filter(ImageFilter.GaussianBlur(blur))
-
-    tint = Image.new('RGBA', region.size, SCRIM + (CARD_OPACITY,))
-    region = Image.alpha_composite(region.convert('RGBA'), tint)
-
-    # Rounded corners: paste through a mask so the artwork stays untouched outside.
-    mask = Image.new('L', region.size, 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, region.size[0] - 1, region.size[1] - 1],
-                                          radius=radius, fill=255)
-    base.paste(region.convert('RGB'), (x0, y0), mask)
-
-    # Hairline edge to separate the card from busy imagery.
-    edge = Image.new('RGBA', base.size, (0, 0, 0, 0))
-    ImageDraw.Draw(edge).rounded_rectangle([x0, y0, x1 - 1, y1 - 1], radius=radius,
-                                          outline=(255, 255, 255, 46),
-                                          width=max(1, int((y1 - y0) * 0.005)))
-    base.paste(Image.alpha_composite(base.convert('RGBA'), edge).convert('RGB'), (0, 0))
-
-
 def _draw_card(base: Image.Image, weather: Weather, box, updated_text: str,
                hours: int) -> None:
     x0, y0, x1, y1 = box
@@ -242,12 +218,41 @@ def _draw_card(base: Image.Image, weather: Weather, box, updated_text: str,
                           fill=RAIN, anchor='rm')
 
 
+def _composite_overlay(base: Image.Image, weather: Weather, box,
+                       updated_text: str, hours: int) -> Image.Image:
+    """Draw the widget directly on the artwork with only a soft content shadow."""
+    x0, y0, x1, y1 = box
+    card_h = box[3] - box[1]
+    blur = max(1, int(card_h * SHADOW_BLUR))
+    offset = max(1, int(card_h * SHADOW_OFFSET))
+    margin = blur * 3 + offset
+    layer_size = (x1 - x0 + margin * 2, y1 - y0 + margin * 2)
+    local_box = (margin, margin, layer_size[0] - margin, layer_size[1] - margin)
+
+    content = Image.new('RGBA', layer_size, (0, 0, 0, 0))
+    _draw_card(content, weather, local_box, updated_text, hours)
+
+    alpha = content.getchannel('A').filter(ImageFilter.GaussianBlur(blur))
+    alpha = alpha.point(lambda value: value * SHADOW_OPACITY // 255)
+
+    shadow_ink = Image.new('RGBA', layer_size, (0, 0, 0, 0))
+    shadow_ink.putalpha(alpha)
+    shadow = Image.new('RGBA', layer_size, (0, 0, 0, 0))
+    shadow.paste(shadow_ink, (0, offset))
+
+    destination = (x0 - margin, y0 - margin)
+    result = base.convert('RGBA')
+    result.alpha_composite(shadow, dest=destination)
+    result.alpha_composite(content, dest=destination)
+    return result.convert('RGB')
+
+
 def render(weather: Weather, path: Path, size: Tuple[int, int] = (3840, 2160),
            date_text: str = '', updated_text: str = '',
            background: Optional[Path] = None, corner: str = 'bottom-right',
            scale: float = 1.0, hours: int = 4) -> Path:
     """
-    Composite the weather card onto the template image and save to `path`.
+    Composite the weather overlay onto the template image and save to `path`.
 
     `date_text` is accepted for callers that want it but is not drawn — the card
     is deliberately minimal; `updated_text` carries the freshness signal.
@@ -258,10 +263,7 @@ def render(weather: Weather, path: Path, size: Tuple[int, int] = (3840, 2160),
 
     base = load_background(background, size)
     box = _card_box(size, corner, scale, hours)
-    radius = int((box[3] - box[1]) * 0.075)
-
-    _frost(base, box, radius)
-    _draw_card(base, weather, box, updated_text, hours)
+    base = _composite_overlay(base, weather, box, updated_text, hours)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() in ('.jpg', '.jpeg'):
