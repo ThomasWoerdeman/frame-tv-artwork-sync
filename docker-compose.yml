@@ -43,6 +43,9 @@ services:
       # DASHBOARD_CORNER: "bottom-right"
       # DASHBOARD_CARD_SCALE: "1.0"
       # DASHBOARD_CARD_HOURS: "4"
+      # DASHBOARD_SHOW_UPDATED: "true"       # Time on the card; see README on refresh rate
+      # DASHBOARD_TEMPLATE_MINUTES: "60"     # How long each template stays on screen
+      # WEATHER_CACHE_SECONDS: "600"         # Reuse weather data between renders
       # DASHBOARD_IMAGE_FORMAT: "jpg"        # jpg (small, fast) or png
       # DASHBOARD_UNITS: "metric"            # metric or imperial
       # DASHBOARD_TIME_FORMAT: "24h"         # 24h or 12h

@@ -185,7 +185,8 @@ def api_preview():
     settings = dashboard_settings.get()
     # Query parameters let the UI preview a change before saving it.
     for key in ('corner', 'card_scale', 'card_hours', 'units', 'time_format',
-                'location_name', 'latitude', 'longitude', 'timezone', 'background'):
+                'location_name', 'latitude', 'longitude', 'timezone', 'background',
+                'show_updated', 'template_minutes'):
         if key in request.args:
             try:
                 settings[key] = dashboard_settings.coerce(key, request.args[key])
@@ -221,8 +222,9 @@ def api_preview():
             weather,
             scratch,
             size=size,
-            updated_text=now.strftime(clock).lstrip('0'),
-            background=dashboard.pick_background(settings['background']),
+            updated_text=now.strftime(clock).lstrip('0') if settings['show_updated'] else '',
+            background=dashboard.pick_background(settings['background'],
+                                                 settings['template_minutes']),
             corner=settings['corner'],
             scale=settings['card_scale'],
             hours=settings['card_hours'],

@@ -12,6 +12,7 @@ wall would keep showing the first render forever.
 
 import datetime
 import logging
+import os
 import time
 import zoneinfo
 from pathlib import Path
@@ -25,9 +26,22 @@ FILENAME_PREFIX = 'dashboard-'
 RENDER_SUFFIXES = ('.jpg', '.jpeg', '.png')
 TEMPLATE_FORMATS = {'.jpg', '.jpeg', '.png', '.webp'}
 
-# Last template used, so a directory of templates rotates instead of the random
-# walk repeating the same image two cycles running.
-_last_background: Optional[str] = None
+# How long a weather fetch stays good. Open-Meteo refreshes its data roughly
+# every 15 minutes, so a 1-minute sync interval would ask 15 times for the same
+# numbers. Cache them; the sync cadence and the fetch cadence are separate
+# concerns.
+WEATHER_TTL = int(os.getenv('WEATHER_CACHE_SECONDS', '600'))
+
+# Default time each template image stays on screen when `background` is a
+# folder; callers pass the configured value.
+TEMPLATE_MINUTES = int(os.getenv('DASHBOARD_TEMPLATE_MINUTES', '60'))
+_weather_cache: Optional[tuple] = None   # (fetched_at, key, weather)
+
+# Signature of the last render. If nothing visible changed, the existing image
+# is left in place: same filename means the sync finds nothing to upload or
+# delete, so a minute-by-minute refresh costs the TV nothing until the card
+# actually says something different.
+_last_signature: Optional[str] = None
 
 
 def is_dashboard_image(name: str) -> bool:
@@ -57,30 +71,63 @@ def available_templates(background: str) -> list:
     return []
 
 
-def pick_background(background: str) -> Optional[Path]:
+def pick_background(background: str, minutes: Optional[int] = None,
+                    at: Optional[float] = None) -> Optional[Path]:
     """
-    Choose this cycle's template image, advancing through a directory in order.
+    Choose the template image for a point in time.
 
-    Returns None when nothing is configured or the folder is empty — the
-    renderer then falls back to its own gradient so the dashboard still works
-    before any template has been added.
+    Rotation is a function of the clock, not of how often we render: a folder of
+    templates advances every `minutes` regardless of the sync interval.
+    That keeps the artwork changing at a sane pace even at a 1-minute refresh,
+    and makes the choice reproducible — the web UI preview shows the same image
+    the next render will use.
+
+    Returns None when nothing is configured or the folder is empty, so the
+    renderer falls back to its own gradient.
     """
-    global _last_background
-
     templates = available_templates(background)
     if not templates:
         if background:
             logger.warning(f'No template images found at {background}; using the plain background')
         return None
+    if len(templates) == 1:
+        return templates[0]
 
-    names = [p.name for p in templates]
-    if _last_background in names:
-        chosen = templates[(names.index(_last_background) + 1) % len(templates)]
-    else:
-        chosen = templates[0]
+    span = max(minutes or TEMPLATE_MINUTES, 1) * 60
+    slot = int((at if at is not None else time.time()) // span)
+    return templates[slot % len(templates)]
 
-    _last_background = chosen.name
-    return chosen
+
+def _fetch_cached(fetch, key: tuple, **kwargs):
+    """fetch_weather(), memoised for WEATHER_TTL seconds."""
+    global _weather_cache
+
+    now = time.time()
+    if _weather_cache is not None:
+        fetched_at, cached_key, cached = _weather_cache
+        if cached_key == key and now - fetched_at < WEATHER_TTL:
+            logger.debug(f'Using weather data from {int(now - fetched_at)}s ago')
+            return cached
+
+    weather = fetch(**kwargs)
+    if weather is not None:
+        _weather_cache = (now, key, weather)
+    return weather
+
+
+def _signature(weather, updated_text: str, background: Optional[Path],
+               size: tuple, corner: str, card_scale: float, card_hours: int,
+               image_format: str) -> str:
+    """Everything that ends up visible in the render, as a comparable string."""
+    return repr((
+        weather.location, weather.temperature, weather.feels_like, weather.condition,
+        weather.code, weather.is_day, weather.today_high, weather.today_low,
+        weather.humidity, weather.wind_speed, weather.temp_unit,
+        [(h.label, h.temperature, h.precip_chance, h.code, h.is_day)
+         for h in weather.hours[:card_hours]],
+        updated_text, background.name if background else None,
+        size, corner, card_scale, card_hours, image_format,
+    ))
 
 
 def refresh(
@@ -99,6 +146,8 @@ def refresh(
     card_scale: float = 1.0,
     card_hours: int = 4,
     image_format: str = 'jpg',
+    show_updated: bool = True,
+    template_minutes: int = 60,
 ) -> Optional[str]:
     """
     Render a new dashboard image and drop the old ones.
@@ -115,7 +164,10 @@ def refresh(
 
     previous = existing_dashboard_images(dest_dir)
 
-    weather = fetch_weather(
+    key = (latitude, longitude, timezone, location_name, units, time_format,
+           hours_ahead, forecast_days, card_hours)
+    weather = _fetch_cached(
+        fetch_weather, key,
         latitude=latitude,
         longitude=longitude,
         timezone=timezone,
@@ -144,6 +196,19 @@ def refresh(
     clock = '%H:%M' if time_format != '12h' else '%I:%M %p'
 
     suffix = '.png' if image_format == 'png' else '.jpg'
+    updated_text = now.strftime(clock).lstrip('0') if show_updated else ''
+    chosen_background = pick_background(background, template_minutes)
+
+    # Nothing visible changed? Leave the existing render alone. The sync then
+    # sees the same filename already on the TV and does nothing at all, which is
+    # what makes a 1-minute interval affordable.
+    global _last_signature
+    signature = _signature(weather, updated_text, chosen_background, size, corner,
+                           card_scale, card_hours, image_format)
+    if signature == _last_signature and previous:
+        logger.debug(f'Dashboard unchanged; keeping {previous[-1].name}')
+        return previous[-1].name
+
     filename = f'{FILENAME_PREFIX}{int(time.time())}{suffix}'
     target = dest_dir / filename
 
@@ -153,8 +218,8 @@ def refresh(
             target,
             size=size,
             date_text=now.strftime('%A, %d %B %Y'),
-            updated_text=now.strftime(clock).lstrip('0'),
-            background=pick_background(background),
+            updated_text=updated_text,
+            background=chosen_background,
             corner=corner,
             scale=card_scale,
             hours=card_hours,
@@ -171,5 +236,6 @@ def refresh(
             except OSError as e:
                 logger.debug(f'Could not remove stale dashboard image {stale.name}: {e}')
 
+    _last_signature = signature
     logger.info(f'Rendered dashboard image {filename} ({target.stat().st_size // 1024} KB)')
     return filename
