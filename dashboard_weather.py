@@ -10,16 +10,29 @@ account. Coordinates come from the same LOCATION_LATITUDE / LOCATION_LONGITUDE
 import json
 import logging
 import os
+import socket
+import time
 import urllib.error
 import urllib.parse
+import time
 import urllib.request
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-WEATHER_API_URL = 'https://api.open-meteo.com/v1/forecast'
+WEATHER_API_HOST = urllib.parse.urlparse(
+    os.getenv('WEATHER_API_URL', 'https://api.open-meteo.com/v1/forecast')).hostname
+
+WEATHER_API_URL = os.getenv('WEATHER_API_URL', 'https://api.open-meteo.com/v1/forecast')
 WEATHER_TIMEOUT = float(os.getenv('WEATHER_TIMEOUT', '15'))
+
+# Why the last fetch failed, and when one last worked. Kept here so the web UI
+# can show the actual cause instead of a bare "unavailable" — the usual causes
+# are container DNS and blocked egress, which look identical from the outside.
+LAST_ERROR: Optional[str] = None
+LAST_SUCCESS: Optional[float] = None   # epoch seconds of the last good fetch
+LAST_SUCCESS: Optional[float] = None
 
 # WMO weather interpretation codes -> short label. Icons are chosen from the
 # same codes in dashboard_icons.
@@ -161,19 +174,95 @@ def fetch_weather(
     }
     url = f'{WEATHER_API_URL}?{urllib.parse.urlencode(params)}'
 
+    global LAST_ERROR, LAST_SUCCESS
+
     try:
         request = urllib.request.Request(url, headers={'User-Agent': 'frame-tv-dashboard'})
         with urllib.request.urlopen(request, timeout=WEATHER_TIMEOUT) as response:
             payload = json.load(response)
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as e:
-        logger.warning(f'Weather fetch failed: {type(e).__name__}: {e}')
+    except urllib.error.HTTPError as e:
+        LAST_ERROR = f'{WEATHER_API_HOST} returned HTTP {e.code}'
+        logger.warning(f'Weather fetch failed: {LAST_ERROR}')
+        return None
+    except urllib.error.URLError as e:
+        LAST_ERROR = _explain(e.reason)
+        logger.warning(f'Weather fetch failed: {LAST_ERROR}')
+        return None
+    except (OSError, ValueError) as e:
+        LAST_ERROR = f'{type(e).__name__}: {e}'
+        logger.warning(f'Weather fetch failed: {LAST_ERROR}')
         return None
 
     try:
-        return _parse(payload, location_name, metric, use_24h, hours_ahead, forecast_days)
+        weather = _parse(payload, location_name, metric, use_24h, hours_ahead, forecast_days)
     except (KeyError, IndexError, TypeError, ValueError) as e:
-        logger.warning(f'Weather response could not be parsed: {type(e).__name__}: {e}')
+        LAST_ERROR = f'unexpected response format ({type(e).__name__}: {e})'
+        logger.warning(f'Weather response could not be parsed: {LAST_ERROR}')
         return None
+
+    LAST_ERROR = None
+    LAST_SUCCESS = time.time()
+    return weather
+
+
+def _explain(reason) -> str:
+    """
+    Turn a urllib failure into something a user can act on.
+
+    In a container these are nearly always one of two things: the name doesn't
+    resolve (no DNS configured on the container's network) or the connection is
+    refused/times out (egress blocked upstream).
+    """
+    text = str(reason)
+    lowered = text.lower()
+    if 'name or service not known' in lowered or 'nodename nor servname' in lowered \
+            or 'temporary failure in name resolution' in lowered:
+        return (f'cannot resolve {WEATHER_API_HOST} — the container has no working DNS. '
+                f'On unRAID, check the container\'s network mode and DNS settings.')
+    if 'timed out' in lowered or 'timeout' in lowered:
+        return (f'connection to {WEATHER_API_HOST} timed out after '
+                f'{WEATHER_TIMEOUT:.0f}s — outbound HTTPS may be blocked.')
+    if 'refused' in lowered:
+        return f'connection to {WEATHER_API_HOST} was refused — outbound HTTPS may be blocked.'
+    if 'certificate' in lowered:
+        return f'TLS verification failed for {WEATHER_API_HOST}: {text}'
+    if 'unreachable' in lowered:
+        return f'{WEATHER_API_HOST} is unreachable from the container: {text}'
+    return f'{WEATHER_API_HOST} could not be reached: {text}'
+
+
+def _explain(error) -> str:
+    """
+    Turn a fetch failure into something a person can act on.
+
+    Accepts an exception or a URLError.reason, which may itself be an exception
+    or a bare string.
+    """
+    text = str(error)
+    if isinstance(error, urllib.error.HTTPError):
+        return (f'The weather service answered HTTP {error.code}. If this is 429, '
+                f'the free API limit was hit — raise WEATHER_CACHE_SECONDS.')
+    if isinstance(error, (socket.gaierror,)) or 'Name or service not known' in text \
+            or 'Temporary failure in name resolution' in text or 'nodename nor servname' in text:
+        return (f'{WEATHER_API_HOST} could not be resolved: this container has no working DNS. '
+                f'Check its network mode and DNS settings.')
+    if 'CERTIFICATE' in text.upper() or 'SSL:' in text.upper():
+        return (f'TLS failed ({text}). Usually a wrong system clock or an intercepting proxy '
+                f'whose certificate is not installed.')
+    if isinstance(error, socket.timeout) or 'timed out' in text:
+        return (f'The request timed out after {WEATHER_TIMEOUT:.0f}s. Outbound HTTPS may be '
+                f'blocked, or WEATHER_TIMEOUT is too short for this connection.')
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        if isinstance(reason, socket.gaierror) or 'Name or service not known' in str(reason) \
+                or 'Temporary failure in name resolution' in str(reason):
+            return ('api.open-meteo.com could not be resolved: this container has no working '
+                    'DNS. On Docker, check the container\'s network and DNS settings.')
+        if 'CERTIFICATE' in str(reason).upper() or 'SSL' in str(reason).upper():
+            return (f'TLS failed ({reason}). Usually a wrong system clock or an intercepting '
+                    f'proxy without its certificate installed.')
+        return f'Could not reach api.open-meteo.com: {reason}'
+    return f'{type(error).__name__}: {text}'
 
 
 def _parse(payload, location_name, metric, use_24h, hours_ahead, forecast_days) -> Weather:

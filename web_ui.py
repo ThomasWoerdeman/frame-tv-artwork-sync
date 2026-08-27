@@ -127,6 +127,16 @@ def _weather_for(settings: Dict[str, Any]):
     return weather
 
 
+def _weather_health() -> Dict[str, Any]:
+    import dashboard_weather
+    return {
+        'host': dashboard_weather.WEATHER_API_HOST,
+        'last_error': dashboard_weather.LAST_ERROR,
+        'last_success': int(dashboard_weather.LAST_SUCCESS)
+                        if dashboard_weather.LAST_SUCCESS else None,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # routes
 # --------------------------------------------------------------------------- #
@@ -152,6 +162,7 @@ def api_status():
         'templates': [p.name for p in dashboard.available_templates(settings['background'])],
         'template_dir': str(directory) if directory else None,
         'can_upload': directory is not None,
+        'weather': _weather_health(),
         'sync': {
             'tv_ips': getattr(sync, 'TV_IPS', []),
             'interval_minutes': getattr(sync, 'SYNC_INTERVAL_MINUTES', None),
@@ -198,7 +209,9 @@ def api_preview():
 
     weather = _weather_for(settings)
     if weather is None:
-        return jsonify({'error': 'Weather data is unavailable right now.'}), 502
+        import dashboard_weather
+        reason = dashboard_weather.LAST_ERROR or 'reason unknown'
+        return jsonify({'error': f'Weather data is unavailable: {reason}'}), 502
 
     import datetime
     import zoneinfo
@@ -311,6 +324,73 @@ def api_template_delete(name: str):
         return jsonify({'error': f'Could not delete it: {e}'}), 500
     logger.info(f'Template deleted: {name}')
     return jsonify({'deleted': name})
+
+
+@app.get('/api/diagnostics')
+def api_diagnostics():
+    """
+    Check the things that break in a container: name resolution, outbound
+    HTTPS, the icon assets, and whether the settings directory is writable.
+
+    "Weather data unavailable" on its own sends people hunting through logs;
+    this says which of those four it is.
+    """
+    import socket
+    import urllib.error
+    import urllib.request
+
+    import dashboard_icons
+    import dashboard_weather
+
+    checks = {}
+
+    host = dashboard_weather.WEATHER_API_HOST
+    try:
+        addresses = sorted({info[4][0] for info in socket.getaddrinfo(host, 443)})
+        checks['dns'] = {'ok': True, 'detail': f'{host} resolves to {", ".join(addresses)}'}
+    except OSError as e:
+        checks['dns'] = {'ok': False,
+                         'detail': f'cannot resolve {host}: {e}. The container has no working '
+                                   f'DNS — check its network mode and DNS settings.'}
+
+    probe = f'{dashboard_weather.WEATHER_API_URL}?latitude=0&longitude=0&current=temperature_2m'
+    try:
+        request = urllib.request.Request(probe, headers={'User-Agent': 'frame-tv-dashboard'})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            checks['weather_api'] = {'ok': response.status == 200,
+                                     'detail': f'HTTP {response.status} from {host}'}
+    except urllib.error.HTTPError as e:
+        checks['weather_api'] = {'ok': False, 'detail': f'HTTP {e.code} from {host}'}
+    except (urllib.error.URLError, OSError) as e:
+        reason = getattr(e, 'reason', e)
+        checks['weather_api'] = {'ok': False,
+                                 'detail': dashboard_weather._explain(reason)}
+
+    found, referenced = dashboard_icons.available()
+    checks['icons'] = {'ok': found == referenced,
+                       'detail': f'{found}/{referenced} icons in {dashboard_icons.ICON_DIR}'}
+
+    settings_dir = dashboard_settings.CONFIG_DIR
+    probe_file = settings_dir / '.write-test'
+    try:
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        probe_file.write_text('ok')
+        probe_file.unlink()
+        checks['config_writable'] = {'ok': True, 'detail': f'{settings_dir} is writable'}
+    except OSError as e:
+        checks['config_writable'] = {'ok': False,
+                                     'detail': f'{settings_dir} is not writable: {e}. '
+                                               f'Settings changes will not persist.'}
+
+    # Informational, never a failure: running with no template is a valid setup,
+    # the card just sits on the plain background.
+    templates = dashboard.available_templates(dashboard_settings.get()['background'])
+    checks['templates'] = {'ok': True,
+                           'detail': f'{len(templates)} template image(s) found'
+                                     if templates else 'none yet — the card renders on a '
+                                                       'plain background'}
+
+    return jsonify({'ok': all(c['ok'] for c in checks.values()), 'checks': checks})
 
 
 @app.post('/api/sync-now')
